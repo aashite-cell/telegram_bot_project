@@ -1,12 +1,12 @@
 """
-Free Telegram Video Downloader Bot
------------------------------------
+Free Telegram Video Downloader Bot (Webhook Version)
+----------------------------------------------------
 This version works completely free (no Stripe subscriptions).
 
-Features:
-- Download videos from YouTube, TikTok, Instagram.
-- Built using python-telegram-bot (v22.5), yt-dlp, Flask.
-- MongoDB used only for basic user storage (optional).
+✅ Faster Response using Webhook
+✅ Works 24/7 with UptimeRobot
+✅ Download videos from YouTube, TikTok, Instagram.
+✅ Built using python-telegram-bot (v22.5), yt-dlp, Flask, MongoDB.
 
 Author: Anas Project 2026
 """
@@ -17,7 +17,7 @@ import os
 import threading
 from datetime import datetime
 import yt_dlp
-from flask import Flask
+from flask import Flask, request
 from pymongo import MongoClient
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGODB_URI = os.getenv("MONGODB_URI")
-PORT = int(os.getenv("PORT", 5000))
+PORT = int(os.getenv("PORT", 10000))
+WEBHOOK_URL = "https://telegram-bot-85nr.onrender.com"  # رابط خدمتك على Render ✅
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Please define it in your environment.")
@@ -53,7 +54,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "✅ Telegram Downloader Bot is running!"
+    return "✅ Telegram Downloader Bot (Webhook Version) is running!"
 
 # ---------------- Handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,6 +94,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "format": "best[ext=mp4]/best",
             "quiet": True,
             "no_warnings": True,
+            "noplaylist": True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -113,13 +115,20 @@ async def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
 
+    # تشغيل Flask في Thread منفصل
     def run_flask():
         flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
     threading.Thread(target=run_flask, daemon=True).start()
 
-    logger.info("🚀 Starting Telegram bot...")
-    await application.run_polling()
+    logger.info("🚀 Starting Telegram bot with Webhook...")
+
+    await application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+    )
 
 # ---------------- Run ----------------
 if __name__ == "__main__":
