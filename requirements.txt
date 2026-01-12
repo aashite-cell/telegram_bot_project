@@ -5,3 +5,4 @@ pymongo
 dnspython
 yt-dlp
 nest_asyncio
+yt-dlp>=2025.01.01
