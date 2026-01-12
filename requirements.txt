@@ -1,0 +1,6 @@
+python-telegram-bot==22.5
+stripe
+Flask
+pymongo
+dnspython
+yt-dlp
