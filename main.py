@@ -1,15 +1,10 @@
 """
 Free Telegram Video Downloader Bot (Webhook Version)
 ----------------------------------------------------
-This version works completely free (no Stripe subscriptions).
-
-✅ Fast Response using Webhook
-✅ Works 24/7 with UptimeRobot
-✅ Download videos from YouTube, TikTok, Instagram
-✅ Compatible with Render servers
-✅ Handles YouTube restrictions safely
-
-Author: Anas Project 2026
+✅ Works with Render + UptimeRobot
+✅ Fix: Webhook conflict + Port separation
+✅ Added /status command
+✅ Supports YouTube, TikTok, Instagram
 """
 
 import asyncio
@@ -39,7 +34,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGODB_URI = os.getenv("MONGODB_URI")
 PORT = int(os.getenv("PORT", 10000))
-WEBHOOK_URL = "https://telegram-bot-85nr.onrender.com"  # رابط خدمتك على Render ✅
+WEBHOOK_URL = "https://telegram-bot-85nr.onrender.com"
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set.")
@@ -51,21 +46,18 @@ mongo_client = MongoClient(MONGODB_URI)
 db = mongo_client.get_default_database()
 users_collection = db["users"]
 
-# ---------------- Flask ----------------
+# ---------------- Flask (للمراقبة فقط) ----------------
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "✅ Telegram Downloader Bot (Webhook Version) is running!"
-
+    return "✅ Bot is live and healthy (Render Webhook Version)"
 
 # ---------------- Helpers ----------------
 def clean_url(url: str) -> str:
-    """ينظف الرابط من الزوائد مثل ?si= أو &feature="""
     url = re.sub(r"[?&]si=[^&]+", "", url)
     url = re.sub(r"[?&]feature=[^&]+", "", url)
     return url.strip()
-
 
 # ---------------- Handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,12 +72,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "👋 مرحبًا بك في بوت تحميل الفيديوهات!\n\n"
-        "يمكنك تحميل مقاطع من يوتيوب أو تيك توك أو إنستغرام بسهولة.\n"
-        "فقط أرسل الرابط مباشرة أو اضغط الزر أدناه 👇",
+        "👋 أهلاً بك في بوت التحميل!\n"
+        "🎥 أرسل رابط فيديو من يوتيوب أو تيك توك أو إنستغرام وسأقوم بتحميله لك.\n\n"
+        "👇 اضغط الزر أو أرسل الرابط مباشرة:",
         reply_markup=reply_markup,
     )
 
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    await update.message.reply_text(f"✅ البوت يعمل الآن بشكل طبيعي!\n🕒 الوقت الحالي: {now}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -93,10 +88,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "send_link":
         await query.edit_message_text("📥 أرسل الآن رابط الفيديو الذي تريد تحميله:")
 
-
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = clean_url(update.message.text.strip())
-    await update.message.reply_text("⏳ يتم الآن تحميل الفيديو، يرجى الانتظار...")
+    await update.message.reply_text("⏳ يتم الآن تحميل الفيديو...")
 
     try:
         os.makedirs("/tmp/downloads", exist_ok=True)
@@ -108,7 +102,6 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "noplaylist": True,
             "retries": 3,
             "age_limit": 0,
-            "extract_flat": False,
             "geo_bypass": True,
             "nocheckcertificate": True,
         }
@@ -121,22 +114,23 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_video(video=video_file)
 
         os.remove(file_path)
-        logger.info(f"✅ تم تحميل الفيديو بنجاح: {url}")
+        logger.info(f"✅ تم تحميل الفيديو: {url}")
 
     except Exception as e:
         logger.error(f"Download error: {e}")
-        await update.message.reply_text("❌ حدث خطأ أثناء تحميل الفيديو. تأكد من الرابط وجرب مرة أخرى.")
-
+        await update.message.reply_text("❌ حدث خطأ أثناء التحميل. تأكد من الرابط وجرب مرة أخرى.")
 
 # ---------------- Main ----------------
 async def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
 
+    # Flask على منفذ منفصل
     def run_flask():
-        flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+        flask_app.run(host="0.0.0.0", port=PORT + 1, debug=False, use_reloader=False)
 
     threading.Thread(target=run_flask, daemon=True).start()
     logger.info("🚀 Starting Telegram bot with Webhook...")
@@ -147,7 +141,6 @@ async def main():
         url_path=BOT_TOKEN,
         webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
     )
-
 
 # ---------------- Run ----------------
 if __name__ == "__main__":
