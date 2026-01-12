@@ -1,9 +1,9 @@
 """
-Free Telegram Video Downloader Bot (Webhook Version)
+Telegram Video Downloader Bot (Stable Webhook Version)
 ----------------------------------------------------
-✅ Works with Render + UptimeRobot
-✅ Fix: Webhook conflict + Port separation
-✅ Added /status command
+✅ Fully compatible with Render hosting
+✅ Fixed: Port conflict & event loop errors
+✅ Added: /status command
 ✅ Supports YouTube, TikTok, Instagram
 """
 
@@ -37,9 +37,9 @@ PORT = int(os.getenv("PORT", 10000))
 WEBHOOK_URL = "https://telegram-bot-85nr.onrender.com"
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set.")
+    raise RuntimeError("BOT_TOKEN not set!")
 if not MONGODB_URI:
-    raise RuntimeError("MONGODB_URI is not set.")
+    raise RuntimeError("MONGODB_URI not set!")
 
 # ---------------- MongoDB ----------------
 mongo_client = MongoClient(MONGODB_URI)
@@ -51,46 +51,43 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "✅ Bot is live and healthy (Render Webhook Version)"
+    return "✅ Telegram Downloader Bot is Running (Webhook Active)"
 
-# ---------------- Helpers ----------------
+# ---------------- Helper ----------------
 def clean_url(url: str) -> str:
     url = re.sub(r"[?&]si=[^&]+", "", url)
-    url = re.sub(r"[?&]feature=[^&]+", "", url)
     return url.strip()
 
 # ---------------- Handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    telegram_id = update.effective_user.id
+    user = update.effective_user
     users_collection.update_one(
-        {"telegram_id": telegram_id},
+        {"telegram_id": user.id},
         {"$setOnInsert": {"created_at": datetime.utcnow()}},
         upsert=True,
     )
 
-    keyboard = [[InlineKeyboardButton("🔗 أرسل رابط الفيديو الآن", callback_data="send_link")]]
+    keyboard = [[InlineKeyboardButton("🎥 أرسل رابط الفيديو", callback_data="send_link")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "👋 أهلاً بك في بوت التحميل!\n"
-        "🎥 أرسل رابط فيديو من يوتيوب أو تيك توك أو إنستغرام وسأقوم بتحميله لك.\n\n"
-        "👇 اضغط الزر أو أرسل الرابط مباشرة:",
+        "👋 أهلاً بك في بوت التحميل!\n\n"
+        "📥 أرسل رابط فيديو من يوتيوب أو تيك توك أو إنستغرام وسأقوم بتحميله لك.",
         reply_markup=reply_markup,
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    await update.message.reply_text(f"✅ البوت يعمل الآن بشكل طبيعي!\n🕒 الوقت الحالي: {now}")
+    await update.message.reply_text(f"✅ البوت يعمل الآن!\n🕒 الوقت الحالي: {now}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "send_link":
-        await query.edit_message_text("📥 أرسل الآن رابط الفيديو الذي تريد تحميله:")
+    await query.edit_message_text("📥 أرسل رابط الفيديو الذي تريد تحميله:")
 
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = clean_url(update.message.text.strip())
-    await update.message.reply_text("⏳ يتم الآن تحميل الفيديو...")
+    await update.message.reply_text("⏳ جاري تحميل الفيديو، يرجى الانتظار...")
 
     try:
         os.makedirs("/tmp/downloads", exist_ok=True)
@@ -100,10 +97,6 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "retries": 3,
-            "age_limit": 0,
-            "geo_bypass": True,
-            "nocheckcertificate": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -114,25 +107,27 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_video(video=video_file)
 
         os.remove(file_path)
-        logger.info(f"✅ تم تحميل الفيديو: {url}")
+        logger.info(f"✅ Download complete: {url}")
 
     except Exception as e:
-        logger.error(f"Download error: {e}")
-        await update.message.reply_text("❌ حدث خطأ أثناء التحميل. تأكد من الرابط وجرب مرة أخرى.")
+        logger.error(f"❌ Error downloading: {e}")
+        await update.message.reply_text("⚠️ حدث خطأ أثناء تحميل الفيديو. تأكد من الرابط وحاول مرة أخرى.")
 
 # ---------------- Main ----------------
 async def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
 
-    # Flask على منفذ منفصل
+    # تشغيل Flask في Thread داخلي فقط (بدون منفذ خارجي)
     def run_flask():
-        flask_app.run(host="0.0.0.0", port=PORT + 1, debug=False, use_reloader=False)
+        flask_app.run(host="127.0.0.1", port=PORT + 1, debug=False, use_reloader=False)
 
     threading.Thread(target=run_flask, daemon=True).start()
+
     logger.info("🚀 Starting Telegram bot with Webhook...")
 
     await application.run_webhook(
@@ -151,4 +146,4 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+        logger.info("🛑 Bot stopped.")
