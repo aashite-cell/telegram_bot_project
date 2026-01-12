@@ -4,3 +4,4 @@ Flask
 pymongo
 dnspython
 yt-dlp
+nest_asyncio
