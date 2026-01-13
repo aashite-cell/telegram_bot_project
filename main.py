@@ -77,13 +77,19 @@ async def main():
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
-    await application.updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+    await application.updater.start_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
+    )
 
     logger.info("✅ Webhook set and bot is ready!")
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
-    if os.getenv("RENDER") is None:
-    app.run(host="0.0.0.0", port=PORT)
 
+    # 🚫 منع تشغيل Flask في Render (حتى لا يحدث تضارب على نفس المنفذ)
+    if os.getenv("RENDER") is None:
+        app.run(host="0.0.0.0", port=PORT)
