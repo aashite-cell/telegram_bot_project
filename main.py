@@ -53,14 +53,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_bot")
 
-# ✅ اقفل لوغز httpx/httpcore نهائياً حتى ما يظهر التوكن أبداً
+# اقفل لوغز httpx/httpcore نهائياً حتى ما يظهر التوكن
 for noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
     lg = logging.getLogger(noisy)
     lg.setLevel(logging.CRITICAL)
     lg.propagate = False
     lg.disabled = True
 
-# ✅ خفف لوغز تيليجرام/ويركزوج
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -115,8 +114,26 @@ def classify_url(url: str) -> str:
     return "other"
 
 
+def _fix_impersonate_for_python_api(opts: dict) -> None:
+    """
+    yt-dlp (في بعض الإصدارات الحديثة) يتوقع impersonate يكون ImpersonateTarget
+    وليس string. إذا التحويل فشل، نحذف impersonate حتى ما ينهار البرنامج.
+    """
+    if "impersonate" not in opts or opts["impersonate"] is None:
+        return
+
+    # إذا كانت string، حاول تحويلها
+    if isinstance(opts["impersonate"], str):
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget.from_str(opts["impersonate"].lower())
+        except Exception:
+            # fallback: عطّل impersonation بدل ما ينهار
+            opts.pop("impersonate", None)
+
+
 def build_ydl_opts(url: str) -> dict:
-    # بدون ffmpeg: أسهل على Render، ويقلل مشاكل الدمج
+    # بدون ffmpeg: أسهل على Render
     fmt = "best[ext=mp4]/best"
 
     opts = {
@@ -137,12 +154,15 @@ def build_ydl_opts(url: str) -> dict:
 
     kind = classify_url(url)
 
-    # تحسينات يوتيوب: أحيانًا تقلل مشاكل "bot check"
+    # تحسينات يوتيوب
     if kind == "youtube":
         opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
 
-    # TikTok: يساعد لو curl-cffi موجود
+    # TikTok وبعض المواقع: impersonation (لكن لازم نصلح نوعها للـ Python API)
     opts["impersonate"] = "chrome"
+
+    # ✅ إصلاح المشكلة اللي سببت AssertionError
+    _fix_impersonate_for_python_api(opts)
 
     return opts
 
@@ -162,8 +182,7 @@ async def run_yt_dlp_download(url: str) -> dict:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلا 👋\n"
-        "ابعثلي رابط فيديو (YouTube / TikTok / إلخ) وأنا بحاول نزّله.\n"
-        "إذا كان الفيديو محمي أو الموقع غيّر نظامه، ممكن يفشل أحياناً."
+        "ابعثلي رابط فيديو (YouTube / TikTok / إلخ) وأنا بحاول نزّله."
     )
 
 
@@ -196,7 +215,6 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"✅ تم التحميل: {title}\nبس ما قدرت أحدد مسار الملف.")
             return
 
-        # إرسال الملف للتيليجرام
         try:
             await msg.edit_text(f"✅ تم التحميل: {title}\n⏳ عم أرسل الملف…")
             with file_path.open("rb") as f:
@@ -211,31 +229,20 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     except Exception:
-        # ✅ هذا أهم شيء: يطبع السبب الحقيقي بالـ Logs
         logger.exception("❌ Download error (full traceback):")
 
         if kind == "youtube":
             user_msg = (
                 "⚠️ فشل التحميل من YouTube.\n"
-                "الأسباب الشائعة:\n"
-                "• الفيديو محمي/يتطلب تسجيل دخول/تحقق\n"
-                "• الكوكيز منتهية أو غير مناسبة\n"
-                "جرّب رابط آخر أو حدّث cookies."
+                "جرّب رابط آخر أو حدّث cookies إذا الفيديو محمي."
             )
         elif kind == "tiktok":
             user_msg = (
                 "⚠️ فشل التحميل من TikTok.\n"
-                "الأسباب الشائعة:\n"
-                "• تيك توك يغيّر النظام أحياناً\n"
-                "• بعض الروابط تحتاج تحديث yt-dlp\n"
-                "جرّب بعد دقيقة، وإذا استمر الفشل حدث yt-dlp."
+                "جرّب بعد دقيقة. إذا استمر الفشل، قد يلزم تحديث yt-dlp."
             )
         else:
-            user_msg = (
-                "⚠️ فشل التحميل.\n"
-                "قد يكون الرابط غير مدعوم أو محمي.\n"
-                "جرّب رابط آخر."
-            )
+            user_msg = "⚠️ فشل التحميل. قد يكون الرابط غير مدعوم أو محمي."
 
         await msg.edit_text(user_msg)
 
