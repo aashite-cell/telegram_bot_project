@@ -13,21 +13,21 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 import yt_dlp
 
+# ✅ ffmpeg portable (بدون apt / بدون بروكسي / مجاني)
+import imageio_ffmpeg
+
+
 # =========================
 # Render / Env config
 # =========================
 PORT = int(os.getenv("PORT", "10000"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # https://xxxx.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # https://telegram-bot-85nr.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")    # سر لمسار الويبهوك
+PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري (TikTok/YouTube)
 
-PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري (لو TikTok حجب IP)
-TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()  # اختياري لتثبيت device_id
-
-# مهم: فورمات اليوتيوب بدون ffmpeg (ملف واحد فقط)
-# يفضّل mp4، وإذا ما موجود بياخد webm، وإذا ما موجود بياخد أي best واحد
-YOUTUBE_FORMAT = (os.getenv("YOUTUBE_FORMAT") or "b[ext=mp4]/b[ext=webm]/b").strip()
+TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN غير موجود في Render Environment.")
@@ -43,12 +43,15 @@ BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# ملف كوكيز واحد لكل المواقع (يوتيوب + تيك توك)
-# ارفعه على Render كـ Secret File باسم cookies.txt
+# cookies.txt (Secret File على Render)
 COOKIES_PATH = BASE_DIR / "cookies.txt"
 
+# ffmpeg exe path (portable)
+FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+
+
 # =========================
-# Logging (خفّف ضجيج التوكن)
+# Logging
 # =========================
 logging.basicConfig(
     level=logging.INFO,
@@ -56,17 +59,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_bot")
 
-for noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
-    lg = logging.getLogger(noisy)
-    lg.setLevel(logging.CRITICAL)
-    lg.propagate = False
-    lg.disabled = True
-
-logging.getLogger("telegram").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext").setLevel(logging.WARNING)
-logging.getLogger("werkzeug").setLevel(logging.WARNING)
-
-STAMP = "v8-youtube-format-fix-2026-01-13"
 
 # =========================
 # Flask app + Telegram app
@@ -76,6 +68,7 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
+
 
 # =========================
 # Helpers
@@ -102,6 +95,7 @@ def safe_filename(name: str) -> str:
     return name[:160] if len(name) > 160 else name
 
 def find_downloaded_file(info: dict) -> Path | None:
+    # yt-dlp الجديد عادة يحط المسار هون
     req = info.get("requested_downloads")
     if isinstance(req, list) and req:
         fp = req[0].get("filepath") or req[0].get("filename")
@@ -109,12 +103,33 @@ def find_downloaded_file(info: dict) -> Path | None:
             p = Path(fp)
             if p.exists():
                 return p
+
+    # fallback
     fn = info.get("_filename")
     if fn:
         p = Path(fn)
         if p.exists():
             return p
+
+    # fallback ثاني: merged file
+    # أحياناً بعد الدمج بيطلع filename بمكان مختلف
+    merged = info.get("filepath") or info.get("filename")
+    if merged:
+        p = Path(merged)
+        if p.exists():
+            return p
+
     return None
+
+def _fix_impersonate_for_python_api(opts: dict) -> None:
+    if "impersonate" not in opts or opts["impersonate"] is None:
+        return
+    if isinstance(opts["impersonate"], str):
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget.from_str(opts["impersonate"].lower())
+        except Exception:
+            opts.pop("impersonate", None)
 
 def _get_device_id() -> str:
     if TIKTOK_DEVICE_ID.isdigit() and len(TIKTOK_DEVICE_ID) >= 15:
@@ -124,42 +139,47 @@ def _get_device_id() -> str:
 def build_ydl_opts(url: str) -> dict:
     kind = classify_url(url)
 
-    # ملاحظة مهمة:
-    # "b" يعني Best single file (صوت+صورة بنفس الملف) -> ما يحتاج ffmpeg
-    # على YouTube أحياناً mp4 غير متاح كملف واحد، فنعطي fallback إلى webm ثم أي best
-    fmt = "best"
-    if kind == "youtube":
-        fmt = YOUTUBE_FORMAT
-    elif kind == "tiktok":
-        fmt = "best"
-
     opts = {
         "outtmpl": str(DOWNLOAD_DIR / "%(title)s.%(ext)s"),
-        "format": fmt,
+
+        # ✅ خليها عامة وما تشدد على mp4 فقط
+        # رح ننزل أفضل فيديو + أفضل صوت وبعدين ندمج
+        "format": "bv*+ba/best",
+
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "retries": 3,
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 3,
-        "nopart": True,
-        "overwrites": True,
+
+        # ✅ ffmpeg portable للدمج على Render
+        "ffmpeg_location": FFMPEG_EXE,
+
+        # ✅ خلي الناتج mp4 قدر الإمكان (Remux/merge)
+        "merge_output_format": "mp4",
     }
 
+    # Proxy اختياري
     if PROXY_URL:
         opts["proxy"] = PROXY_URL
 
-    # Cookies (عام لكل المواقع)
-    logger.info(f"[{STAMP}] [cookies] exists? {COOKIES_PATH.exists()} path={COOKIES_PATH}")
+    # Cookies
     if COOKIES_PATH.exists():
+        logger.info(f"[cookies] exists? True path={COOKIES_PATH}")
+        logger.info("✅ Using cookies.txt")
         opts["cookiefile"] = str(COOKIES_PATH)
-        logger.info(f"[{STAMP}] ✅ Using cookies.txt")
+    else:
+        logger.info(f"[cookies] exists? False path={COOKIES_PATH}")
 
-    # YouTube تحسينات: اختار أكثر من عميل لتقليل مشاكل "not a bot"
+    # YouTube improvements
     if kind == "youtube":
         opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
+        # مرات بيساعد:
+        opts["impersonate"] = "chrome"
+        _fix_impersonate_for_python_api(opts)
 
-    # TikTok: إعدادات API mode (ممكن تساعد)
+    # TikTok
     if kind == "tiktok":
         device_id = _get_device_id()
         opts.setdefault("extractor_args", {})
@@ -169,6 +189,8 @@ def build_ydl_opts(url: str) -> dict:
             "aid": "1180",
             "manifest_app_version": "2023401020",
         }
+        opts["impersonate"] = "chrome"
+        _fix_impersonate_for_python_api(opts)
 
     return opts
 
@@ -192,10 +214,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 طريقة الاستخدام:\n"
         "1) ابعت رابط الفيديو مباشرة.\n"
         "2) انتظر لحد ما يخلص التحميل.\n\n"
-        "ملاحظات:\n"
-        "- YouTube أحياناً يرسل WebM بدل MP4، وهذا طبيعي.\n"
-        "- إذا YouTube قال (not a bot): لازم cookies.txt من حساب YouTube.\n"
-        "- إذا TikTok فشل: ممكن يحتاج PROXY_URL."
+        "إذا YouTube فشل: جرّب تحديث cookies.txt.\n"
+        "إذا TikTok فشل: جرّب cookies أو Proxy."
     )
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,30 +241,21 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"✅ تم التحميل: {title}\n⏳ عم أرسل الملف…")
         with file_path.open("rb") as f:
             await update.message.reply_document(document=f, filename=file_path.name)
-
         await msg.edit_text(f"✅ تم الإرسال بنجاح: {title}")
 
-        # تنظيف بعد الإرسال لتوفير مساحة
-        try:
-            file_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
     except Exception:
-        logger.exception(f"[{STAMP}] ❌ Download error (full traceback):")
+        logger.exception("❌ Download error (full traceback):")
 
-        if kind == "youtube":
-            await msg.edit_text(
-                "⚠️ فشل التحميل من YouTube.\n"
-                "الأسباب الشائعة:\n"
-                "1) كوكيز YouTube غير صحيحة/ناقصة.\n"
-                "2) الفيديو يحتاج تسجيل دخول.\n\n"
-                "جرّب تصدير الكوكيز من نفس المتصفح اللي أنت مسجل فيه على YouTube ثم ارفع cookies.txt من جديد."
-            )
-        elif kind == "tiktok":
+        if kind == "tiktok":
             await msg.edit_text(
                 "⚠️ فشل التحميل من TikTok.\n"
-                "إذا استمر الفشل: جرّب PROXY_URL أو حدّث cookies.txt."
+                "إذا استمر: تأكد cookies.txt أو جرّب PROXY_URL."
+            )
+        elif kind == "youtube":
+            await msg.edit_text(
+                "⚠️ فشل التحميل من YouTube.\n"
+                "إذا ظهر (Sign in / not a bot): صدّر cookies اليوتيوب من جديد.\n"
+                "إذا ظهر (Requested format not available): الكود لازم يتحدث (وهذا الكود مصلّحها)."
             )
         else:
             await msg.edit_text("⚠️ فشل التحميل. قد يكون الرابط غير مدعوم أو محمي.")
@@ -269,18 +280,19 @@ def webhook():
         update = Update.de_json(data, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     except Exception:
-        logger.exception(f"[{STAMP}] ❌ Error handling webhook (full traceback):")
+        logger.exception("❌ Error handling webhook (full traceback):")
     return "OK", 200
 
 # =========================
 # Startup
 # =========================
 async def main():
-    logger.info(f"🚀 Starting Telegram bot... ({STAMP})")
+    logger.info("🚀 Starting Telegram bot...")
+    logger.info(f"✅ ffmpeg_location = {FFMPEG_EXE}")
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook/{WEBHOOK_SECRET}")
-    logger.info(f"✅ Webhook set and bot is ready! ({STAMP})")
+    logger.info("✅ Webhook set and bot is ready!")
 
 if __name__ == "__main__":
     loop.create_task(main())

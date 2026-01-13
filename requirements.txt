@@ -1,7 +1,6 @@
 Flask==3.0.3
 python-telegram-bot[webhooks]==22.5
-pymongo==4.10.1
-dnspython==2.6.1
+yt-dlp[curl-cffi,default]@ git+https://github.com/yt-dlp/yt-dlp.git
 httpx==0.27.2
 nest_asyncio==1.6.0
-yt-dlp[default,curl-cffi] @ git+https://github.com/yt-dlp/yt-dlp.git
+imageio-ffmpeg>=0.4.9
