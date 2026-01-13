@@ -27,6 +27,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # مثال: https://telegram-bot-85nr.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")    # كلمة سر لمسار الويبهوك
 MONGODB_URI = os.getenv("MONGODB_URI")          # اختياري
+PROXY_URL = os.getenv("PROXY_URL", "").strip()  # اختياري لاحقاً إذا TikTok حجب IP السيرفر
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN غير موجود في Environment Variables على Render.")
@@ -116,24 +117,21 @@ def classify_url(url: str) -> str:
 
 def _fix_impersonate_for_python_api(opts: dict) -> None:
     """
-    yt-dlp (في بعض الإصدارات الحديثة) يتوقع impersonate يكون ImpersonateTarget
-    وليس string. إذا التحويل فشل، نحذف impersonate حتى ما ينهار البرنامج.
+    بعض إصدارات yt-dlp تتوقع impersonate يكون ImpersonateTarget مش string.
+    إذا التحويل فشل، بنحذفه حتى ما ينهار البرنامج.
     """
     if "impersonate" not in opts or opts["impersonate"] is None:
         return
 
-    # إذا كانت string، حاول تحويلها
     if isinstance(opts["impersonate"], str):
         try:
             from yt_dlp.networking.impersonate import ImpersonateTarget
             opts["impersonate"] = ImpersonateTarget.from_str(opts["impersonate"].lower())
         except Exception:
-            # fallback: عطّل impersonation بدل ما ينهار
             opts.pop("impersonate", None)
 
 
 def build_ydl_opts(url: str) -> dict:
-    # بدون ffmpeg: أسهل على Render
     fmt = "best[ext=mp4]/best"
 
     opts = {
@@ -148,20 +146,30 @@ def build_ydl_opts(url: str) -> dict:
         "restrictfilenames": False,
     }
 
+    # Optional proxy (إذا TikTok حجب IP)
+    if PROXY_URL:
+        opts["proxy"] = PROXY_URL
+
     # Cookies لليوتيوب (إن وجدت)
     if COOKIES_PATH.exists():
         opts["cookiefile"] = str(COOKIES_PATH)
 
     kind = classify_url(url)
 
-    # تحسينات يوتيوب
+    # تحسينات YouTube
     if kind == "youtube":
         opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
 
-    # TikTok وبعض المواقع: impersonation (لكن لازم نصلح نوعها للـ Python API)
-    opts["impersonate"] = "chrome"
+    # TikTok: workaround مشهور لتغيير api hostname عند تعطل استخراج بيانات الويب
+    # (يفيد في كثير من حالات "Unable to extract webpage video data")
+    if kind == "tiktok":
+        opts.setdefault("extractor_args", {})
+        opts["extractor_args"]["tiktok"] = {
+            "api_hostname": "api22-normal-c-useast2a.tiktokv.com"
+        }
 
-    # ✅ إصلاح المشكلة اللي سببت AssertionError
+    # Impersonation (مع إصلاح نوعه للـ Python API)
+    opts["impersonate"] = "chrome"
     _fix_impersonate_for_python_api(opts)
 
     return opts
@@ -179,12 +187,15 @@ async def run_yt_dlp_download(url: str) -> dict:
 # =========================
 # Bot handlers
 # =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "أهلا 👋\n"
-        "ابعثلي رابط فيديو (YouTube / TikTok / إلخ) وأنا بحاول نزّله."
-    )
+WELCOME_TEXT = (
+    "أهلا 👋\n"
+    "أنا بوت تحميل فيديوهات.\n"
+    "ابعث رابط YouTube أو TikTok وأنا بحاول نزّله وأرسله لك.\n"
+    "اكتب /help للمساعدة."
+)
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(WELCOME_TEXT)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -198,8 +209,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = (update.message.text or "").strip()
 
+    # إذا المستخدم كتب كلمة مو رابط، ابعتله الترحيب بدل ما نقله خطأ
     if not url.startswith(("http://", "https://")):
-        await update.message.reply_text("ابعت رابط صحيح يبدأ بـ http أو https.")
+        await update.message.reply_text(WELCOME_TEXT)
         return
 
     kind = classify_url(url)
@@ -225,7 +237,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(
                 f"✅ تم التحميل: {title}\n"
                 "⚠️ بس فشل إرسال الملف (غالباً بسبب الحجم/قيود تيليجرام).\n"
-                "جرّب فيديو أقصر أو أقل جودة."
+                "جرّب فيديو أقصر."
             )
 
     except Exception:
@@ -234,12 +246,13 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if kind == "youtube":
             user_msg = (
                 "⚠️ فشل التحميل من YouTube.\n"
-                "جرّب رابط آخر أو حدّث cookies إذا الفيديو محمي."
+                "إذا الفيديو محمي/يتطلب تسجيل دخول: حدّث cookies."
             )
         elif kind == "tiktok":
             user_msg = (
                 "⚠️ فشل التحميل من TikTok.\n"
-                "جرّب بعد دقيقة. إذا استمر الفشل، قد يلزم تحديث yt-dlp."
+                "جرّب بعد دقيقة. إذا استمر الفشل، غالباً TikTok حجب IP السيرفر.\n"
+                "وقتها بنستخدم PROXY_URL."
             )
         else:
             user_msg = "⚠️ فشل التحميل. قد يكون الرابط غير مدعوم أو محمي."
@@ -257,7 +270,6 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download
 @app.get("/")
 def index():
     return "✅ Bot is running on Render!"
-
 
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
 def webhook():
@@ -286,7 +298,6 @@ async def main():
     await application.bot.set_webhook(url=webhook_full)
 
     logger.info("✅ Webhook set and bot is ready!")
-
 
 if __name__ == "__main__":
     loop.create_task(main())
