@@ -16,20 +16,20 @@ PORT = int(os.getenv("PORT", 10000))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# إصلاح الـ event loop على Render
+# إصلاح event loop لتجنب أخطاء Render
 nest_asyncio.apply()
 
 # إعداد Flask
 app = Flask(__name__)
 
-# تأكيد وجود الكوكيز
+# تأكيد وجود ملف الكوكيز
 COOKIES_PATH = os.path.join(os.getcwd(), "youtube_cookies.txt")
 if os.path.exists(COOKIES_PATH):
     logger.info(f"✅ Cookie file found at {COOKIES_PATH}")
 else:
     logger.warning("⚠️ Cookie file NOT found inside Render project!")
 
-# تعريف الدوال الخاصة بالبوت
+# تعريف دوال البوت
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 مرحبًا! أرسل لي رابط فيديو YouTube وسأقوم بتحميله لك.")
 
@@ -42,8 +42,6 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "outtmpl": "downloads/%(title)s.%(ext)s",
             "format": "mp4",
         }
-
-        # إذا كان ملف الكوكيز موجود، نضيفه
         if os.path.exists(COOKIES_PATH):
             ydl_opts["cookiefile"] = COOKIES_PATH
 
@@ -56,31 +54,33 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Error downloading: {e}")
         await update.message.reply_text("⚠️ حدث خطأ أثناء تحميل الفيديو. تأكد من الرابط وحاول مرة أخرى.")
 
-# إعداد البوت
+# إنشاء التطبيق
 application = Application.builder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
 
+# تهيئة الـ loop الرئيسي
+loop = asyncio.get_event_loop()
+
 @app.route("/")
 def index():
-    return "✅ Bot is running on Render!"
+    return "✅ Bot is alive!"
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    """يُعالج طلبات Telegram webhook"""
+    """مسار استقبال Webhook من Telegram"""
     try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, application.bot)
-        asyncio.create_task(application.process_update(update))
+        update_data = request.get_json(force=True)
+        update = Update.de_json(update_data, application.bot)
+        # نستخدم نفس الـ loop الموجود بدل asyncio.run()
+        loop.create_task(application.process_update(update))
     except Exception as e:
-        logger.error(f"❌ Error in webhook: {e}")
+        logger.error(f"❌ Webhook error: {e}")
     return "OK", 200
 
 async def main():
-    """تشغيل البوت باستخدام Webhook"""
     logger.info("🚀 Starting Telegram bot with Webhook...")
 
-    # تأكد من أن التطبيق تم تهيئته بالكامل قبل استقبال أي طلبات
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
@@ -88,10 +88,8 @@ async def main():
     logger.info("✅ Webhook set and bot is ready!")
 
 if __name__ == "__main__":
-    # تشغيل التطبيق بشكل متزامن
-    loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
 
-    # 🚫 منع Flask من الاشتغال على Render (لتفادي تضارب المنفذ)
+    # Flask فقط عند التشغيل المحلي (وليس على Render)
     if os.getenv("RENDER") is None:
         app.run(host="0.0.0.0", port=PORT)
