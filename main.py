@@ -14,15 +14,20 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 import yt_dlp
 
 # =========================
+# VERSION STAMP (حتى نتأكد إن الكود الجديد شغال)
+# =========================
+APP_VERSION = "v7-cookies-stamp-2026-01-13"
+
+# =========================
 # Render / Env config
 # =========================
 PORT = int(os.getenv("PORT", "10000"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # مثال: https://telegram-bot-85nr.onrender.com
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")    # سر لمسار الويبهوك
-PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري إذا TikTok حجب IP السيرفر
-TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()  # اختياري لتثبيت device_id
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+PROXY_URL = (os.getenv("PROXY_URL") or "").strip()
+TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN غير موجود في Render Environment.")
@@ -38,12 +43,11 @@ BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# ✅ ملف كوكيز واحد لكل المواقع (يوتيوب + تيك توك)
-# ارفعه على Render كـ Secret File باسم cookies.txt
+# لازم Secret File على Render باسم cookies.txt
 COOKIES_PATH = BASE_DIR / "cookies.txt"
 
 # =========================
-# Logging (hide noisy logs that may include token)
+# Logging
 # =========================
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +55,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_bot")
 
-# اقفل لوغز httpx/httpcore نهائياً
 for noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
     lg = logging.getLogger(noisy)
     lg.setLevel(logging.CRITICAL)
@@ -63,7 +66,7 @@ logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # =========================
-# Flask app + Telegram app
+# Flask + Telegram
 # =========================
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
@@ -71,14 +74,12 @@ application = Application.builder().token(BOT_TOKEN).build()
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# =========================
-# Helpers
-# =========================
 WELCOME_TEXT = (
     "أهلا 👋\n"
     "أنا بوت تحميل فيديوهات.\n"
     "ابعث رابط YouTube أو TikTok وأنا بحاول نزّله وأرسله لك.\n"
-    "اكتب /help للمساعدة."
+    "اكتب /help للمساعدة.\n\n"
+    f"🧩 Version: {APP_VERSION}"
 )
 
 def classify_url(url: str) -> str:
@@ -103,20 +104,14 @@ def find_downloaded_file(info: dict) -> Path | None:
             p = Path(fp)
             if p.exists():
                 return p
-
     fn = info.get("_filename")
     if fn:
         p = Path(fn)
         if p.exists():
             return p
-
     return None
 
 def _fix_impersonate_for_python_api(opts: dict) -> None:
-    """
-    بعض نسخ yt-dlp تتوقع impersonate يكون ImpersonateTarget بدل string.
-    إذا فشل التحويل، منزيله لتجنب انهيار البرنامج.
-    """
     if "impersonate" not in opts or opts["impersonate"] is None:
         return
     if isinstance(opts["impersonate"], str):
@@ -145,25 +140,22 @@ def build_ydl_opts(url: str) -> dict:
         "concurrent_fragment_downloads": 3,
     }
 
-    # ✅ LOG للتأكد أن Render شايف ملف الكوكيز
-    logger.info(f"Cookies exists? {COOKIES_PATH.exists()}  path={COOKIES_PATH}")
+    # ✅ تأكيد واضح في اللوج قبل أي تحميل
+    logger.info(f"[{APP_VERSION}] Cookies exists? {COOKIES_PATH.exists()}  path={COOKIES_PATH}")
 
-    # Proxy (اختياري)
     if PROXY_URL:
         opts["proxy"] = PROXY_URL
+        logger.info(f"[{APP_VERSION}] Proxy enabled")
 
-    # Cookies (عام لكل المواقع)
     if COOKIES_PATH.exists():
         opts["cookiefile"] = str(COOKIES_PATH)
-        logger.info("✅ Using cookies.txt")
+        logger.info(f"[{APP_VERSION}] ✅ Using cookies.txt")
     else:
-        logger.warning("⚠️ cookies.txt NOT found. TikTok/YouTube may fail without it.")
+        logger.warning(f"[{APP_VERSION}] ⚠️ cookies.txt NOT found")
 
-    # YouTube improvements
     if kind == "youtube":
         opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
 
-    # TikTok tweaks (قد تحسّن فرص النجاح)
     if kind == "tiktok":
         device_id = _get_device_id()
 
@@ -197,12 +189,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📌 طريقة الاستخدام:\n"
-        "1) ابعت رابط الفيديو مباشرة.\n"
-        "2) انتظر لحد ما يخلص التحميل.\n\n"
-        "ملاحظات مهمة:\n"
-        "- إذا TikTok فشل: غالباً تحتاج cookies.txt أو Proxy.\n"
-        "- إذا YouTube طلب تسجيل دخول: cookies.txt بيساعد."
+        "📌 الاستخدام:\n"
+        "1) ابعت رابط الفيديو.\n"
+        "2) استنى التحميل.\n\n"
+        f"🧩 Version: {APP_VERSION}\n"
+        "- إذا TikTok فشل حتى مع cookies: غالباً بدنا Proxy (PROXY_URL)."
     )
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,7 +208,6 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         info = await run_yt_dlp_download(url)
-
         title = safe_filename(info.get("title") or "video")
         file_path = find_downloaded_file(info)
 
@@ -231,18 +221,18 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"✅ تم الإرسال بنجاح: {title}")
 
     except Exception:
-        logger.exception("❌ Download error (full traceback):")
+        logger.exception(f"[{APP_VERSION}] ❌ Download error (full traceback):")
 
         if kind == "tiktok":
             await msg.edit_text(
                 "⚠️ فشل التحميل من TikTok.\n"
-                "تأكد أن cookies.txt مرفوع كـ Secret File على Render.\n"
-                "إذا موجود ولسه فشل: غالباً TikTok حاجب IP السيرفر، ساعتها بدنا PROXY_URL."
+                "راجع الـ Logs وشوف سطر Cookies exists? True/False.\n"
+                "إذا True ولسه فشل: غالباً TikTok حاجب IP السيرفر → بدنا PROXY_URL."
             )
         elif kind == "youtube":
             await msg.edit_text(
                 "⚠️ فشل التحميل من YouTube.\n"
-                "إذا الفيديو محمي/يتطلب تسجيل دخول: ارفع cookies.txt."
+                "إذا يحتاج تسجيل دخول: ارفع cookies.txt."
             )
         else:
             await msg.edit_text("⚠️ فشل التحميل. قد يكون الرابط غير مدعوم أو محمي.")
@@ -267,18 +257,18 @@ def webhook():
         update = Update.de_json(data, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     except Exception:
-        logger.exception("❌ Error handling webhook (full traceback):")
+        logger.exception(f"[{APP_VERSION}] ❌ Error handling webhook:")
     return "OK", 200
 
 # =========================
 # Startup
 # =========================
 async def main():
-    logger.info("🚀 Starting Telegram bot...")
+    logger.info(f"🚀 Starting Telegram bot... ({APP_VERSION})")
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook/{WEBHOOK_SECRET}")
-    logger.info("✅ Webhook set and bot is ready!")
+    logger.info(f"✅ Webhook set and bot is ready! ({APP_VERSION})")
 
 if __name__ == "__main__":
     loop.create_task(main())
