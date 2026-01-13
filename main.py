@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import asyncio
+import random
 from pathlib import Path
 from threading import Thread
 
@@ -16,10 +17,14 @@ import yt_dlp
 # Render / Env config
 # =========================
 PORT = int(os.getenv("PORT", "10000"))
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # https://telegram-bot-85nr.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")    # سر لمسار الويبهوك
-PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري لاحقًا إذا TikTok حجب IP السيرفر
+PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري إذا TikTok حجب IP السيرفر
+
+# (اختياري) ثبّت device_id حتى ما يتغير كل مرة
+TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN غير موجود في Render Environment.")
@@ -107,6 +112,7 @@ def find_downloaded_file(info: dict) -> Path | None:
     return None
 
 def _fix_impersonate_for_python_api(opts: dict) -> None:
+    # بعض إصدارات yt-dlp تتوقع ImpersonateTarget بدل string
     if "impersonate" not in opts or opts["impersonate"] is None:
         return
     if isinstance(opts["impersonate"], str):
@@ -115,6 +121,12 @@ def _fix_impersonate_for_python_api(opts: dict) -> None:
             opts["impersonate"] = ImpersonateTarget.from_str(opts["impersonate"].lower())
         except Exception:
             opts.pop("impersonate", None)
+
+def _get_device_id() -> str:
+    # TikTok device_id عادة رقم طويل (نخليه ثابت إذا وفّرته بالـ ENV)
+    if TIKTOK_DEVICE_ID.isdigit() and len(TIKTOK_DEVICE_ID) >= 15:
+        return TIKTOK_DEVICE_ID
+    return "".join(str(random.randint(0, 9)) for _ in range(19))
 
 def build_ydl_opts(url: str) -> dict:
     kind = classify_url(url)
@@ -142,17 +154,24 @@ def build_ydl_opts(url: str) -> dict:
     if kind == "youtube":
         opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
 
-    # ✅ TikTok workaround مشهور لحالات "Unable to extract webpage video data"
-    # مذكور في قضايا yt-dlp كتجربة حل. :contentReference[oaicite:3]{index=3}
+    # TikTok: حاول نحول الاستخراج لـ API mode بوسيطات ثابتة
     if kind == "tiktok":
+        device_id = _get_device_id()
+
         opts.setdefault("extractor_args", {})
         opts["extractor_args"]["tiktok"] = {
-            "api_hostname": "api22-normal-c-useast2a.tiktokv.com"
+            # workaround شائع لتغيير الـ api hostname
+            "api_hostname": "api22-normal-c-useast2a.tiktokv.com",
+
+            # تحسينات API mode (device_id/aid/manifest_app_version)
+            "device_id": device_id,
+            "aid": "1180",
+            "manifest_app_version": "2023401020",
         }
 
-    # impersonation (مع تصحيح النوع)
-    opts["impersonate"] = "chrome"
-    _fix_impersonate_for_python_api(opts)
+        # أحياناً impersonate يساعد، بس لازم ننظّمه للـ Python API
+        opts["impersonate"] = "chrome"
+        _fix_impersonate_for_python_api(opts)
 
     return opts
 
@@ -176,8 +195,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 طريقة الاستخدام:\n"
         "1) ابعت رابط الفيديو مباشرة.\n"
         "2) انتظر لحد ما يخلص التحميل.\n\n"
-        "إذا TikTok فشل: أحيانًا يحتاج تحديث yt-dlp أو Proxy.\n"
-        "إذا TikTok حساب خاص: يحتاج cookies لحساب عنده صلاحية. :contentReference[oaicite:4]{index=4}"
+        "إذا TikTok فشل: غالبًا يحتاج cookies.txt أو Proxy (لأن IP السيرفر ممكن ينحجب)."
     )
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,18 +229,16 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if kind == "tiktok":
             await msg.edit_text(
                 "⚠️ فشل التحميل من TikTok.\n"
-                "إذا استمر الفشل حتى بعد التحديث، غالبًا TikTok حجب IP السيرفر.\n"
-                "الحل وقتها: تفعيل PROXY_URL أو استخدام cookies."
+                "إذا استمر الفشل: أضف cookies.txt (من حساب تيك توك) أو فعّل PROXY_URL على Render."
             )
         elif kind == "youtube":
             await msg.edit_text(
                 "⚠️ فشل التحميل من YouTube.\n"
-                "إذا الفيديو محمي/يتطلب تسجيل دخول: استخدم cookies.txt."
+                "إذا الفيديو محمي/يتطلب تسجيل دخول: أضف cookies.txt."
             )
         else:
             await msg.edit_text("⚠️ فشل التحميل. قد يكون الرابط غير مدعوم أو محمي.")
 
-# register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
