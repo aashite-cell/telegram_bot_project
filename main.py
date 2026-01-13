@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import asyncio
+import random
 from pathlib import Path
 from threading import Thread
 
@@ -12,16 +13,21 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 import yt_dlp
 
-
 # =========================
 # Render / Env config
 # =========================
 PORT = int(os.getenv("PORT", "10000"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # مثال: https://telegram-bot-85nr.onrender.com
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")    # سر لمسار الويبهوك (مش التوكن)
-PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري (مهم جدًا مع TikTok أحيانًا)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # https://xxxx.onrender.com
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")    # سر لمسار الويبهوك
+
+PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري (لو TikTok حجب IP)
+TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()  # اختياري لتثبيت device_id
+
+# مهم: فورمات اليوتيوب بدون ffmpeg (ملف واحد فقط)
+# يفضّل mp4، وإذا ما موجود بياخد webm، وإذا ما موجود بياخد أي best واحد
+YOUTUBE_FORMAT = (os.getenv("YOUTUBE_FORMAT") or "b[ext=mp4]/b[ext=webm]/b").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN غير موجود في Render Environment.")
@@ -30,7 +36,6 @@ if not WEBHOOK_URL:
 if not WEBHOOK_SECRET:
     raise RuntimeError("WEBHOOK_SECRET غير موجود في Render Environment.")
 
-
 # =========================
 # Paths
 # =========================
@@ -38,12 +43,12 @@ BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# ✅ ارفع هذا الملف على Render كـ Secret File باسم cookies.txt
+# ملف كوكيز واحد لكل المواقع (يوتيوب + تيك توك)
+# ارفعه على Render كـ Secret File باسم cookies.txt
 COOKIES_PATH = BASE_DIR / "cookies.txt"
 
-
 # =========================
-# Logging (no token leakage)
+# Logging (خفّف ضجيج التوكن)
 # =========================
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +56,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_bot")
 
-# اسكت لوجز مزعجة ممكن تظهر روابط
 for noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
     lg = logging.getLogger(noisy)
     lg.setLevel(logging.CRITICAL)
@@ -62,16 +66,16 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
+STAMP = "v8-youtube-format-fix-2026-01-13"
 
 # =========================
-# Flask + Telegram
+# Flask app + Telegram app
 # =========================
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
-
 
 # =========================
 # Helpers
@@ -112,54 +116,59 @@ def find_downloaded_file(info: dict) -> Path | None:
             return p
     return None
 
+def _get_device_id() -> str:
+    if TIKTOK_DEVICE_ID.isdigit() and len(TIKTOK_DEVICE_ID) >= 15:
+        return TIKTOK_DEVICE_ID
+    return "".join(str(random.randint(0, 9)) for _ in range(19))
+
 def build_ydl_opts(url: str) -> dict:
     kind = classify_url(url)
 
-    # User-Agent ثابت (يساعد بعض المواقع)
-    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-          "AppleWebKit/537.36 (KHTML, like Gecko) "
-          "Chrome/120.0.0.0 Safari/537.36")
+    # ملاحظة مهمة:
+    # "b" يعني Best single file (صوت+صورة بنفس الملف) -> ما يحتاج ffmpeg
+    # على YouTube أحياناً mp4 غير متاح كملف واحد، فنعطي fallback إلى webm ثم أي best
+    fmt = "best"
+    if kind == "youtube":
+        fmt = YOUTUBE_FORMAT
+    elif kind == "tiktok":
+        fmt = "best"
 
     opts = {
         "outtmpl": str(DOWNLOAD_DIR / "%(title)s.%(ext)s"),
-        "format": "best[ext=mp4]/best",
+        "format": fmt,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "retries": 3,
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 3,
-
-        # Headers عامة
-        "http_headers": {
-            "User-Agent": ua,
-        },
+        "nopart": True,
+        "overwrites": True,
     }
 
-    # Proxy (اختياري - لكنه غالبًا الحل الحقيقي لتيك توك على Render)
     if PROXY_URL:
         opts["proxy"] = PROXY_URL
 
     # Cookies (عام لكل المواقع)
-    logger.info(f"[cookies] exists? {COOKIES_PATH.exists()} path={COOKIES_PATH}")
+    logger.info(f"[{STAMP}] [cookies] exists? {COOKIES_PATH.exists()} path={COOKIES_PATH}")
     if COOKIES_PATH.exists():
         opts["cookiefile"] = str(COOKIES_PATH)
-        logger.info("✅ Using cookies.txt")
-    else:
-        logger.warning("⚠️ cookies.txt not found (Secret File). Some links may fail.")
+        logger.info(f"[{STAMP}] ✅ Using cookies.txt")
 
-    # YouTube improvements
+    # YouTube تحسينات: اختار أكثر من عميل لتقليل مشاكل "not a bot"
     if kind == "youtube":
         opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
 
-    # TikTok headers (مهم)
+    # TikTok: إعدادات API mode (ممكن تساعد)
     if kind == "tiktok":
-        opts["http_headers"].update({
-            "Referer": "https://www.tiktok.com/",
-            "Origin": "https://www.tiktok.com",
-        })
-
-        # ملاحظة: لو TikTok حاظرك على IP الداتا سنتر، الكوكيز لوحدها ممكن ما تكفي.
+        device_id = _get_device_id()
+        opts.setdefault("extractor_args", {})
+        opts["extractor_args"]["tiktok"] = {
+            "api_hostname": "api22-normal-c-useast2a.tiktokv.com",
+            "device_id": device_id,
+            "aid": "1180",
+            "manifest_app_version": "2023401020",
+        }
 
     return opts
 
@@ -172,7 +181,6 @@ async def run_yt_dlp_download(url: str) -> dict:
 
     return await asyncio.to_thread(_download)
 
-
 # =========================
 # Bot handlers
 # =========================
@@ -184,8 +192,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 طريقة الاستخدام:\n"
         "1) ابعت رابط الفيديو مباشرة.\n"
         "2) انتظر لحد ما يخلص التحميل.\n\n"
-        "✅ ليوتيوب/تيك توك (لو في مشاكل): ارفع cookies.txt كـ Secret File على Render.\n"
-        "✅ لو تيك توك لسه بيفشل على Render غالبًا محتاج PROXY_URL."
+        "ملاحظات:\n"
+        "- YouTube أحياناً يرسل WebM بدل MP4، وهذا طبيعي.\n"
+        "- إذا YouTube قال (not a bot): لازم cookies.txt من حساب YouTube.\n"
+        "- إذا TikTok فشل: ممكن يحتاج PROXY_URL."
     )
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -214,44 +224,34 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await msg.edit_text(f"✅ تم الإرسال بنجاح: {title}")
 
-        # تنظيف لتجنب امتلاء الديسك
+        # تنظيف بعد الإرسال لتوفير مساحة
         try:
             file_path.unlink(missing_ok=True)
         except Exception:
             pass
 
-    except Exception as e:
-        logger.exception("❌ Download error (full traceback):")
+    except Exception:
+        logger.exception(f"[{STAMP}] ❌ Download error (full traceback):")
 
-        # رسائل أوضح للمستخدم
-        err_txt = str(e).lower()
-
-        if kind == "tiktok":
-            if "unable to extract webpage video data" in err_txt:
-                await msg.edit_text(
-                    "⚠️ فشل التحميل من TikTok.\n"
-                    "✅ الكوكيز عندك ممكن تكون مرفوعة صح، لكن TikTok غالبًا حاجب IP بتاع Render.\n"
-                    "الحل: استخدم PROXY_URL (Residential) + cookies.txt.\n"
-                    "إذا تحب قولي نوع البروكسي اللي عندك وأنا أعطيك صيغة PROXY_URL الصح."
-                )
-            else:
-                await msg.edit_text(
-                    "⚠️ فشل التحميل من TikTok.\n"
-                    "جرّب رابط آخر. وإذا تكرر، غالبًا نحتاج PROXY_URL."
-                )
-        elif kind == "youtube":
+        if kind == "youtube":
             await msg.edit_text(
                 "⚠️ فشل التحميل من YouTube.\n"
-                "إذا الفيديو يحتاج تسجيل دخول/عمر: لازم cookies.txt من حسابك."
+                "الأسباب الشائعة:\n"
+                "1) كوكيز YouTube غير صحيحة/ناقصة.\n"
+                "2) الفيديو يحتاج تسجيل دخول.\n\n"
+                "جرّب تصدير الكوكيز من نفس المتصفح اللي أنت مسجل فيه على YouTube ثم ارفع cookies.txt من جديد."
+            )
+        elif kind == "tiktok":
+            await msg.edit_text(
+                "⚠️ فشل التحميل من TikTok.\n"
+                "إذا استمر الفشل: جرّب PROXY_URL أو حدّث cookies.txt."
             )
         else:
-            await msg.edit_text("⚠️ فشل التحميل. الرابط قد يكون غير مدعوم أو محمي.")
-
+            await msg.edit_text("⚠️ فشل التحميل. قد يكون الرابط غير مدعوم أو محمي.")
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
-
 
 # =========================
 # Flask routes
@@ -269,21 +269,18 @@ def webhook():
         update = Update.de_json(data, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     except Exception:
-        logger.exception("❌ Error handling webhook (full traceback):")
+        logger.exception(f"[{STAMP}] ❌ Error handling webhook (full traceback):")
     return "OK", 200
-
 
 # =========================
 # Startup
 # =========================
 async def main():
-    logger.info("🚀 Starting Telegram bot...")
-
+    logger.info(f"🚀 Starting Telegram bot... ({STAMP})")
     await application.initialize()
     await application.start()
-
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook/{WEBHOOK_SECRET}")
-    logger.info("✅ Webhook set and bot is ready!")
+    logger.info(f"✅ Webhook set and bot is ready! ({STAMP})")
 
 if __name__ == "__main__":
     loop.create_task(main())
