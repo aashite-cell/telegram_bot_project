@@ -1,117 +1,87 @@
-import os
 import logging
-import yt_dlp
+import os
 import nest_asyncio
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import yt_dlp
 import asyncio
 
-# تفعيل الـ asyncio داخل بيئة Render
-nest_asyncio.apply()
+# إعدادات أساسية
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_الخاص_بك_هنا")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://telegram-bot-85nr.onrender.com")
+PORT = int(os.getenv("PORT", 10000))
 
-# إعداد سجل الأحداث (Logs)
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# تفعيل سجل الأحداث
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# بيانات البيئة من Render
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-bot-85nr.onrender.com")
+# إصلاح الـ event loop على Render
+nest_asyncio.apply()
 
-# إعداد تطبيق Flask
+# إعداد Flask
 app = Flask(__name__)
 
-# دالة الترحيب
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 أهلاً بك! أرسل رابط فيديو من YouTube وسأقوم بتحميله لك!")
+# تأكيد وجود الكوكيز
+COOKIES_PATH = os.path.join(os.getcwd(), "youtube_cookies.txt")
+if os.path.exists(COOKIES_PATH):
+    logger.info(f"✅ Cookie file found at {COOKIES_PATH}")
+else:
+    logger.warning("⚠️ Cookie file NOT found inside Render project!")
 
-# دالة التحميل
-async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# تعريف الدوال الخاصة بالبوت
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 مرحبًا! أرسل لي رابط فيديو YouTube وسأقوم بتحميله لك.")
+
+async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-    await update.message.reply_text("⏳ يتم الآن تحميل الفيديو، يرجى الانتظار...")
+    await update.message.reply_text("⏳ جاري تحميل الفيديو، يرجى الانتظار...")
 
     try:
-        os.makedirs("downloads", exist_ok=True)
-
-        # مسار ملف الكوكيز
-        cookie_path = os.path.join(os.getcwd(), "youtube_cookies.txt")
-
-        # فحص وجود الملف وكتابة النتيجة في الـ Logs
-        if os.path.exists(cookie_path):
-            logger.info(f"✅ Cookie file found at {cookie_path}")
-        else:
-            logger.warning("⚠️ Cookie file NOT found inside Render project!")
-
         ydl_opts = {
             "outtmpl": "downloads/%(title)s.%(ext)s",
-            "format": "bestvideo+bestaudio/best",
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
+            "format": "mp4",
         }
 
-        # إذا الملف موجود، نضيفه للإعدادات
-        if os.path.exists(cookie_path):
-            ydl_opts["cookiefile"] = cookie_path
+        # إذا كان ملف الكوكيز موجود، نضيفه
+        if os.path.exists(COOKIES_PATH):
+            ydl_opts["cookiefile"] = COOKIES_PATH
 
-        # تحميل الفيديو
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
+            filename = ydl.prepare_filename(info)
 
-        # إرسال الفيديو للمستخدم
-        with open(file_path, "rb") as video_file:
-            await update.message.reply_video(video=video_file)
-
-        os.remove(file_path)
-
+        await update.message.reply_text(f"✅ تم التحميل بنجاح: {info['title']}")
     except Exception as e:
         logger.error(f"❌ Error downloading: {e}")
-        await update.message.reply_text("⚠️ حدث خطأ أثناء تحميل الفيديو. تأكد من الرابط وجرب مرة أخرى.")
+        await update.message.reply_text("⚠️ حدث خطأ أثناء تحميل الفيديو. تأكد من الرابط وحاول مرة أخرى.")
 
-# تهيئة بوت تيليجرام
-application = ApplicationBuilder().token(BOT_TOKEN).build()
+# إعداد البوت
+application = Application.builder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
 
-# إعداد Webhook
+@app.route("/")
+def index():
+    return "Bot is running!"
+
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
+    asyncio.create_task(application.process_update(update))
     return "OK", 200
 
-@app.route("/", methods=["GET"])
-def index():
-    return "✅ Telegram bot is running!"
-
-# تشغيل البوت
 async def main():
     logger.info("🚀 Starting Telegram bot with Webhook...")
+
+    await application.initialize()
+    await application.start()
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+    await application.updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
 
-    # تشغيل Flask بشكل غير متزامن
-    loop = asyncio.get_running_loop()
-    from threading import Thread
-    Thread(target=lambda: app.run(host="0.0.0.0", port=10000, use_reloader=False)).start()
-
-    while True:
-        await asyncio.sleep(3600)
+    logger.info("✅ Webhook set and bot is ready!")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except RuntimeError:
-        # في حال حدث خطأ في الـ event loop
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
+    app.run(host="0.0.0.0", port=PORT)
