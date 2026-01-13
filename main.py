@@ -63,33 +63,35 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download
 
 @app.route("/")
 def index():
-    return "Bot is running!"
+    return "✅ Bot is running on Render!"
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.create_task(application.process_update(update))
+    """يُعالج طلبات Telegram webhook"""
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+        asyncio.create_task(application.process_update(update))
+    except Exception as e:
+        logger.error(f"❌ Error in webhook: {e}")
     return "OK", 200
 
 async def main():
+    """تشغيل البوت باستخدام Webhook"""
     logger.info("🚀 Starting Telegram bot with Webhook...")
 
+    # تأكد من أن التطبيق تم تهيئته بالكامل قبل استقبال أي طلبات
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
-    await application.updater.start_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    )
 
     logger.info("✅ Webhook set and bot is ready!")
 
 if __name__ == "__main__":
+    # تشغيل التطبيق بشكل متزامن
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
 
-    # 🚫 منع تشغيل Flask في Render (حتى لا يحدث تضارب على نفس المنفذ)
+    # 🚫 منع Flask من الاشتغال على Render (لتفادي تضارب المنفذ)
     if os.getenv("RENDER") is None:
         app.run(host="0.0.0.0", port=PORT)
