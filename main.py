@@ -84,4 +84,6 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+    if os.getenv("RENDER") is None:
     app.run(host="0.0.0.0", port=PORT)
+
