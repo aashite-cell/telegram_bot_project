@@ -19,12 +19,10 @@ import yt_dlp
 PORT = int(os.getenv("PORT", "10000"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # https://telegram-bot-85nr.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # مثال: https://telegram-bot-85nr.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")    # سر لمسار الويبهوك
 PROXY_URL = (os.getenv("PROXY_URL") or "").strip()  # اختياري إذا TikTok حجب IP السيرفر
-
-# (اختياري) ثبّت device_id حتى ما يتغير كل مرة
-TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()
+TIKTOK_DEVICE_ID = (os.getenv("TIKTOK_DEVICE_ID") or "").strip()  # اختياري لتثبيت device_id
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN غير موجود في Render Environment.")
@@ -41,11 +39,11 @@ DOWNLOAD_DIR = BASE_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # ✅ ملف كوكيز واحد لكل المواقع (يوتيوب + تيك توك)
-# على Render ارفعه كـ Secret File باسم cookies.txt
+# ارفعه على Render كـ Secret File باسم cookies.txt
 COOKIES_PATH = BASE_DIR / "cookies.txt"
 
 # =========================
-# Logging (hide token logs)
+# Logging (hide noisy logs that may include token)
 # =========================
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_bot")
 
+# اقفل لوغز httpx/httpcore نهائياً
 for noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
     lg = logging.getLogger(noisy)
     lg.setLevel(logging.CRITICAL)
@@ -104,15 +103,20 @@ def find_downloaded_file(info: dict) -> Path | None:
             p = Path(fp)
             if p.exists():
                 return p
+
     fn = info.get("_filename")
     if fn:
         p = Path(fn)
         if p.exists():
             return p
+
     return None
 
 def _fix_impersonate_for_python_api(opts: dict) -> None:
-    # بعض إصدارات yt-dlp تتوقع ImpersonateTarget بدل string
+    """
+    بعض نسخ yt-dlp تتوقع impersonate يكون ImpersonateTarget بدل string.
+    إذا فشل التحويل، منزيله لتجنب انهيار البرنامج.
+    """
     if "impersonate" not in opts or opts["impersonate"] is None:
         return
     if isinstance(opts["impersonate"], str):
@@ -123,7 +127,6 @@ def _fix_impersonate_for_python_api(opts: dict) -> None:
             opts.pop("impersonate", None)
 
 def _get_device_id() -> str:
-    # TikTok device_id عادة رقم طويل (نخليه ثابت إذا وفّرته بالـ ENV)
     if TIKTOK_DEVICE_ID.isdigit() and len(TIKTOK_DEVICE_ID) >= 15:
         return TIKTOK_DEVICE_ID
     return "".join(str(random.randint(0, 9)) for _ in range(19))
@@ -142,6 +145,9 @@ def build_ydl_opts(url: str) -> dict:
         "concurrent_fragment_downloads": 3,
     }
 
+    # ✅ LOG للتأكد أن Render شايف ملف الكوكيز
+    logger.info(f"Cookies exists? {COOKIES_PATH.exists()}  path={COOKIES_PATH}")
+
     # Proxy (اختياري)
     if PROXY_URL:
         opts["proxy"] = PROXY_URL
@@ -149,27 +155,26 @@ def build_ydl_opts(url: str) -> dict:
     # Cookies (عام لكل المواقع)
     if COOKIES_PATH.exists():
         opts["cookiefile"] = str(COOKIES_PATH)
+        logger.info("✅ Using cookies.txt")
+    else:
+        logger.warning("⚠️ cookies.txt NOT found. TikTok/YouTube may fail without it.")
 
     # YouTube improvements
     if kind == "youtube":
         opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
 
-    # TikTok: حاول نحول الاستخراج لـ API mode بوسيطات ثابتة
+    # TikTok tweaks (قد تحسّن فرص النجاح)
     if kind == "tiktok":
         device_id = _get_device_id()
 
         opts.setdefault("extractor_args", {})
         opts["extractor_args"]["tiktok"] = {
-            # workaround شائع لتغيير الـ api hostname
             "api_hostname": "api22-normal-c-useast2a.tiktokv.com",
-
-            # تحسينات API mode (device_id/aid/manifest_app_version)
             "device_id": device_id,
             "aid": "1180",
             "manifest_app_version": "2023401020",
         }
 
-        # أحياناً impersonate يساعد، بس لازم ننظّمه للـ Python API
         opts["impersonate"] = "chrome"
         _fix_impersonate_for_python_api(opts)
 
@@ -195,7 +200,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 طريقة الاستخدام:\n"
         "1) ابعت رابط الفيديو مباشرة.\n"
         "2) انتظر لحد ما يخلص التحميل.\n\n"
-        "إذا TikTok فشل: غالبًا يحتاج cookies.txt أو Proxy (لأن IP السيرفر ممكن ينحجب)."
+        "ملاحظات مهمة:\n"
+        "- إذا TikTok فشل: غالباً تحتاج cookies.txt أو Proxy.\n"
+        "- إذا YouTube طلب تسجيل دخول: cookies.txt بيساعد."
     )
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -229,12 +236,13 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if kind == "tiktok":
             await msg.edit_text(
                 "⚠️ فشل التحميل من TikTok.\n"
-                "إذا استمر الفشل: أضف cookies.txt (من حساب تيك توك) أو فعّل PROXY_URL على Render."
+                "تأكد أن cookies.txt مرفوع كـ Secret File على Render.\n"
+                "إذا موجود ولسه فشل: غالباً TikTok حاجب IP السيرفر، ساعتها بدنا PROXY_URL."
             )
         elif kind == "youtube":
             await msg.edit_text(
                 "⚠️ فشل التحميل من YouTube.\n"
-                "إذا الفيديو محمي/يتطلب تسجيل دخول: أضف cookies.txt."
+                "إذا الفيديو محمي/يتطلب تسجيل دخول: ارفع cookies.txt."
             )
         else:
             await msg.edit_text("⚠️ فشل التحميل. قد يكون الرابط غير مدعوم أو محمي.")
