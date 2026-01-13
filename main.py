@@ -14,7 +14,7 @@ PORT = int(os.getenv("PORT", 10000))
 
 # تفعيل سجل الأحداث
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
 
 # إصلاح event loop لتجنب أخطاء Render
 nest_asyncio.apply()
@@ -54,7 +54,7 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Error downloading: {e}")
         await update.message.reply_text("⚠️ حدث خطأ أثناء تحميل الفيديو. تأكد من الرابط وحاول مرة أخرى.")
 
-# إنشاء التطبيق
+# إنشاء التطبيق (Application)
 application = Application.builder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
@@ -64,7 +64,7 @@ loop = asyncio.get_event_loop()
 
 @app.route("/")
 def index():
-    return "✅ Bot is alive!"
+    return "✅ Bot is alive and running!"
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
@@ -72,11 +72,19 @@ def webhook():
     try:
         update_data = request.get_json(force=True)
         update = Update.de_json(update_data, application.bot)
-        # نستخدم نفس الـ loop الموجود بدل asyncio.run()
+
+        # التأكد من أن التطبيق جاهز قبل معالجة التحديث
+        if not application.running:
+            logger.warning("⚠️ Application not ready yet, skipping update.")
+            return "Bot not ready", 503
+
         loop.create_task(application.process_update(update))
+        return "OK", 200
+
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}")
-    return "OK", 200
+        return "Error", 500
+
 
 async def main():
     logger.info("🚀 Starting Telegram bot with Webhook...")
@@ -87,9 +95,11 @@ async def main():
 
     logger.info("✅ Webhook set and bot is ready!")
 
+
 if __name__ == "__main__":
+    # تشغيل البوت
     loop.run_until_complete(main())
 
-    # Flask فقط عند التشغيل المحلي (وليس على Render)
+    # Flask يعمل فقط محليًا (وليس داخل Render)
     if os.getenv("RENDER") is None:
         app.run(host="0.0.0.0", port=PORT)
