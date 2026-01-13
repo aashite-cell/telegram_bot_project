@@ -6,36 +6,37 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
 import asyncio
+from threading import Thread
 
-# إعدادات أساسية
+# ===== إعدادات أساسية =====
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_الخاص_بك_هنا")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://telegram-bot-85nr.onrender.com")
 PORT = int(os.getenv("PORT", 10000))
 
-# إعداد السجل
+# ===== إعداد السجل =====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("main")
 
-# إصلاح event loop في Render
+# ===== إصلاح event loop في Render =====
 nest_asyncio.apply()
 
-# إعداد Flask
+# ===== إعداد Flask =====
 app = Flask(__name__)
 
-# إعداد مسار الكوكيز
+# ===== إعداد مسار الكوكيز =====
 COOKIES_PATH = os.path.join(os.getcwd(), "youtube_cookies.txt")
 if os.path.exists(COOKIES_PATH):
     logger.info(f"✅ Cookie file found at {COOKIES_PATH}")
 else:
     logger.warning("⚠️ Cookie file NOT found inside Render project!")
 
-# إنشاء حلقة asyncio واحدة لتشغيل كل المهام
+# ===== إنشاء حلقة asyncio واحدة لتشغيل كل المهام =====
 loop = asyncio.get_event_loop()
 
-# إنشاء التطبيق
+# ===== إنشاء التطبيق =====
 application = Application.builder().token(BOT_TOKEN).build()
 
-# دوال الأوامر
+# ===== دوال الأوامر =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 مرحبًا! أرسل لي رابط فيديو YouTube وسأقوم بتحميله لك.")
 
@@ -52,15 +53,17 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+
         await update.message.reply_text(f"✅ تم التحميل بنجاح: {info['title']}")
     except Exception as e:
         logger.error(f"❌ Error downloading: {e}")
         await update.message.reply_text("⚠️ حدث خطأ أثناء تحميل الفيديو. تأكد من الرابط وحاول مرة أخرى.")
 
-# إضافة المعالجات
+# ===== إضافة المعالجات =====
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
 
+# ===== Flask Routes =====
 @app.route("/")
 def index():
     return "✅ Bot is running on Render!"
@@ -72,7 +75,7 @@ def webhook():
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
 
-        # استخدم loop الرئيسي بدلاً من asyncio.run()
+        # استخدم loop الرئيسي بدل asyncio.run()
         if application.running:
             asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
         else:
@@ -83,6 +86,7 @@ def webhook():
     return "OK", 200
 
 
+# ===== تشغيل البوت =====
 async def main():
     logger.info("🚀 Starting Telegram bot with Webhook...")
 
@@ -92,16 +96,16 @@ async def main():
 
     logger.info("✅ Webhook set and bot is ready!")
 
-# تشغيل البوت
+
 if __name__ == "__main__":
-    # شغّل التهيئة داخل نفس الحلقة
+    # تشغيل التهيئة داخل نفس الحلقة
     loop.create_task(main())
 
     # تشغيل Flask بدون asyncio.run()
     if os.getenv("RENDER") is None:
+        # محلي
         app.run(host="0.0.0.0", port=PORT)
     else:
-        # على Render نحتاج لتشغيل السيرفر داخل نفس الـ loop
-        from threading import Thread
+        # على Render: تشغيل Flask في Thread مخصص، والحفاظ على loop فعال
         Thread(target=lambda: app.run(host="0.0.0.0", port=PORT)).start()
         loop.run_forever()
